@@ -7,35 +7,50 @@ on:
       - main
 
 jobs:
-  shellcheck:
-    name: ShellCheck
+  lint-shell:
+    name: Lint Shell Files
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect shell scripts
+      - name: Detect shell files
         id: detect
         run: |
           set -euo pipefail
-          find . -type f \( -name "*.sh" -o -name "*.zsh" \) -not -path "./.git/*" > shell_files.txt
-          if [ -s shell_files.txt ]; then
-            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          find . -type f -name "*.sh" -not -path "./.git/*" > sh_files.txt
+          find . -type f -name "*.zsh" -not -path "./.git/*" > zsh_files.txt
+          if [ -s sh_files.txt ]; then
+            echo "has_sh=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_files=false" >> "$GITHUB_OUTPUT"
+            echo "has_sh=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -s zsh_files.txt ]; then
+            echo "has_zsh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_zsh=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install ShellCheck
-        if: steps.detect.outputs.has_files == 'true'
+        if: steps.detect.outputs.has_sh == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: Run ShellCheck
-        if: steps.detect.outputs.has_files == 'true'
+      - name: Run ShellCheck on .sh files
+        if: steps.detect.outputs.has_sh == 'true'
         run: |
-          xargs -r shellcheck < shell_files.txt
+          xargs -r shellcheck < sh_files.txt
 
-      - name: Skip when no shell files exist
-        if: steps.detect.outputs.has_files == 'false'
-        run: echo "No .sh or .zsh files found; skipping ShellCheck."
+      - name: Validate .zsh files with zsh -n
+        if: steps.detect.outputs.has_zsh == 'true'
+        run: |
+          xargs -r zsh -n < zsh_files.txt
+
+      - name: Skip ShellCheck when no .sh files exist
+        if: steps.detect.outputs.has_sh == 'false'
+        run: echo "No .sh files found; skipping ShellCheck."
+
+      - name: Skip zsh validation when no .zsh files exist
+        if: steps.detect.outputs.has_zsh == 'false'
+        run: echo "No .zsh files found; skipping zsh -n validation."
