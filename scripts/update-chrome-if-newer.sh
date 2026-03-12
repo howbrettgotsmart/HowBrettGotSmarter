@@ -16,11 +16,13 @@ CHROME_PLIST="${CHROME_APP}/Contents/Info.plist"
 DEFAULT_PKG_URL="https://dl.google.com/chrome/mac/stable/accept_tos%3Dhttps%253A%252F%252Fwww.google.com%252Fintl%252Fen_ph%252Fchrome%252Fterms%252F%26_and_accept_tos%3Dhttps%253A%252F%252Fpolicies.google.com%252Fterms/googlechrome.pkg"
 VERSION_API_BASE="https://versionhistory.googleapis.com/v1/chrome/platforms"
 TMP_PKG=""
+DRY_RUN="false"
+FORCE_INSTALL="false"
 
 usage() {
   cat <<EOF
 Usage:
-  sudo ${SCRIPT_NAME} [--pkg-url URL]
+  sudo ${SCRIPT_NAME} [--pkg-url URL] [--dry-run] [--force]
 
 Description:
   1) Reads installed Chrome version from:
@@ -42,11 +44,28 @@ cleanup_temp_pkg() {
   fi
 }
 
+require_macos() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "ERROR: This script only supports macOS." >&2
+    exit 1
+  fi
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "ERROR: Run as root (use sudo)." >&2
     exit 1
   fi
+}
+
+require_commands() {
+  local cmd
+  for cmd in curl mktemp installer pgrep osascript /usr/libexec/PlistBuddy; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "ERROR: Required command not found: $cmd" >&2
+      exit 1
+    fi
+  done
 }
 
 parse_args() {
@@ -61,6 +80,12 @@ parse_args() {
           exit 1
         fi
         PKG_URL="$1"
+        ;;
+      --dry-run)
+        DRY_RUN="true"
+        ;;
+      --force)
+        FORCE_INSTALL="true"
         ;;
       -h|--help)
         usage
@@ -127,15 +152,54 @@ fetch_latest_version_for_platform() {
   local url="${VERSION_API_BASE}/${platform}/channels/stable/versions?order_by=version%20desc&page_size=1"
   local payload version
 
-  payload="$(curl -fsSL "${url}")"
+  if ! payload="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 "${url}")"; then
+    return 1
+  fi
   version="$(printf '%s' "${payload}" | extract_version_from_json)"
 
   if [[ -z "${version}" ]]; then
-    echo "ERROR: Unable to parse latest version for platform ${platform}." >&2
-    exit 1
+    return 1
   fi
 
   printf '%s\n' "${version}"
+}
+
+fetch_latest_online_version() {
+  local latest_mac=""
+  local latest_mac_arm64=""
+
+  if latest_mac="$(fetch_latest_version_for_platform mac)"; then
+    log "Latest stable mac version from API: ${latest_mac}"
+  else
+    log "WARNING: Failed to fetch stable version for platform: mac"
+  fi
+
+  if latest_mac_arm64="$(fetch_latest_version_for_platform mac_arm64)"; then
+    log "Latest stable mac_arm64 version from API: ${latest_mac_arm64}"
+  else
+    log "WARNING: Failed to fetch stable version for platform: mac_arm64"
+  fi
+
+  if [[ -z "${latest_mac}" && -z "${latest_mac_arm64}" ]]; then
+    echo "ERROR: Failed to fetch latest stable Chrome version from API." >&2
+    exit 1
+  fi
+
+  if [[ -z "${latest_mac}" ]]; then
+    printf '%s\n' "${latest_mac_arm64}"
+    return
+  fi
+
+  if [[ -z "${latest_mac_arm64}" ]]; then
+    printf '%s\n' "${latest_mac}"
+    return
+  fi
+
+  if version_gt "${latest_mac}" "${latest_mac_arm64}"; then
+    printf '%s\n' "${latest_mac}"
+  else
+    printf '%s\n' "${latest_mac_arm64}"
+  fi
 }
 
 quit_chrome_if_running() {
@@ -168,10 +232,12 @@ quit_chrome_if_running() {
 }
 
 main() {
-  local installed_version latest_mac latest_mac_arm64 latest_online
+  local installed_version latest_online post_install_version
 
   trap cleanup_temp_pkg EXIT
+  require_macos
   require_root
+  require_commands
   parse_args "$@"
 
   log "Checking installed Google Chrome version."
@@ -179,19 +245,17 @@ main() {
   log "Installed version: ${installed_version}"
 
   log "Fetching latest stable Chrome version from Google VersionHistory API."
-  latest_mac="$(fetch_latest_version_for_platform mac)"
-  latest_mac_arm64="$(fetch_latest_version_for_platform mac_arm64)"
-
-  if version_gt "${latest_mac}" "${latest_mac_arm64}"; then
-    latest_online="${latest_mac}"
-  else
-    latest_online="${latest_mac_arm64}"
-  fi
+  latest_online="$(fetch_latest_online_version)"
 
   log "Latest online version: ${latest_online}"
 
-  if ! version_gt "${latest_online}" "${installed_version}"; then
+  if [[ "${FORCE_INSTALL}" != "true" ]] && ! version_gt "${latest_online}" "${installed_version}"; then
     log "No update needed. Installed Chrome is current (or newer)."
+    exit 0
+  fi
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    log "Dry run mode: update would be installed."
     exit 0
   fi
 
@@ -199,13 +263,18 @@ main() {
 
   log "Newer version detected. Downloading Chrome package."
   TMP_PKG="$(mktemp /tmp/googlechrome-update.XXXXXX.pkg)"
-  curl -fL "${PKG_URL}" -o "${TMP_PKG}"
+  curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 "${PKG_URL}" -o "${TMP_PKG}"
 
   log "Installing Chrome package."
   /usr/sbin/installer -pkg "${TMP_PKG}" -target /
 
-  log "Install complete. Current installed version:"
-  read_installed_version
+  post_install_version="$(read_installed_version)"
+  log "Install complete. Current installed version: ${post_install_version}"
+
+  if version_gt "${latest_online}" "${post_install_version}"; then
+    log "WARNING: Installed version is still behind latest online version."
+    exit 1
+  fi
 }
 
 main "$@"
