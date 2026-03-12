@@ -31,6 +31,13 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
+require_macos() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "ERROR: This script only supports macOS." >&2
+    exit 1
+  fi
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "ERROR: Run as root (use sudo)." >&2
@@ -50,12 +57,14 @@ main() {
     exit 1
   fi
 
+  require_macos
   require_root
 
   log "Disabling LaunchDaemon (if loaded): ${DAEMON_LABEL}"
   launchctl disable "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
 
   log "Unloading LaunchDaemon (if loaded): ${LAUNCHD_PLIST}"
+  launchctl bootout "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
   launchctl bootout system "${LAUNCHD_PLIST}" >/dev/null 2>&1 || true
 
   if [[ -f "${LAUNCHD_PLIST}" ]]; then
@@ -70,6 +79,12 @@ main() {
     rm -f "${RUNNER_SCRIPT}"
   else
     log "Runner script already absent: ${RUNNER_SCRIPT}"
+  fi
+
+  if launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+    log "WARNING: Service still appears loaded: ${DAEMON_LABEL}"
+  else
+    log "Service is not loaded: ${DAEMON_LABEL}"
   fi
 
   log "RUM LaunchD uninstaller complete."

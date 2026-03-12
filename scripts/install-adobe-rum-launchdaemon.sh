@@ -15,6 +15,8 @@ DAEMON_LABEL="com.howbrettgotsmart.adobe-rum-updates"
 LAUNCHD_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 RUNNER_SCRIPT="/usr/local/bin/adobe-rum-update-check.sh"
 LOG_FILE="/var/log/adobe-rum-updates.log"
+RUNNER_DIR="$(dirname "${RUNNER_SCRIPT}")"
+LOG_DIR="$(dirname "${LOG_FILE}")"
 RUM_PATH_DEFAULT="/usr/local/bin/RemoteUpdateManager"
 
 usage() {
@@ -32,11 +34,25 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
+require_macos() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "ERROR: This script only supports macOS." >&2
+    exit 1
+  fi
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "ERROR: Run as root (use sudo)." >&2
     exit 1
   fi
+}
+
+ensure_required_paths() {
+  mkdir -p "${RUNNER_DIR}" "${LOG_DIR}"
+  touch "${LOG_FILE}"
+  chmod 644 "${LOG_FILE}"
+  chown root:wheel "${LOG_FILE}"
 }
 
 parse_args() {
@@ -86,8 +102,10 @@ timestamp() {
 
 {
   echo "[\$(timestamp)] Starting Adobe RUM update check."
+  set +e
   "\${RUM_PATH}" --action=install
   rc=\$?
+  set -e
   echo "[\$(timestamp)] Adobe RUM update check completed with exit code \$rc."
   exit \$rc
 } >> "\${LOG_FILE}" 2>&1
@@ -142,18 +160,24 @@ EOF
 
   chmod 644 "${LAUNCHD_PLIST}"
   chown root:wheel "${LAUNCHD_PLIST}"
+
+  /usr/bin/plutil -lint "${LAUNCHD_PLIST}" >/dev/null
 }
 
 load_launchdaemon() {
   log "Loading LaunchDaemon via launchctl."
+  launchctl bootout "system/${DAEMON_LABEL}" >/dev/null 2>&1 || true
   launchctl bootout system "${LAUNCHD_PLIST}" >/dev/null 2>&1 || true
   launchctl bootstrap system "${LAUNCHD_PLIST}"
   launchctl enable "system/${DAEMON_LABEL}" || true
+  launchctl print "system/${DAEMON_LABEL}" >/dev/null
 }
 
 main() {
+  require_macos
   require_root
   parse_args "$@"
+  ensure_required_paths
   install_runner_script
   install_launchdaemon
   load_launchdaemon
